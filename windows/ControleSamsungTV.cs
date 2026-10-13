@@ -60,6 +60,8 @@ namespace ControleSamsungTV
 
         private readonly string ip;
         private readonly string token;
+        private readonly string smartThingsToken;
+        private readonly string smartThingsDeviceId;
         private readonly Forms.NotifyIcon tray;
         private TextBlock stateLabel;
         private TextBlock modelLabel;
@@ -73,6 +75,7 @@ namespace ControleSamsungTV
         private readonly Dictionary<string, Button> tabs = new Dictionary<string, Button>();
         private bool allowClose;
         private bool busy;
+        private bool statusReadPending;
         private int volumeLevel;
         private Border volumeFill;
         private Ellipse volumeThumb;
@@ -86,6 +89,8 @@ namespace ControleSamsungTV
             // Este é o IP confirmado para a TV deste projeto; o .env continua podendo sobrescrevê-lo.
             ip = ReadSetting("IP", "");
             token = ReadSetting("TOKEN_TV", "");
+            smartThingsToken = ReadSetting("SMARTTHINGS_TOKEN", "");
+            smartThingsDeviceId = ReadSetting("SMARTTHINGS_DEVICE_ID", "");
             Title = "Controle Samsung TV";
             Width = 382;
             Height = 604;
@@ -149,7 +154,7 @@ namespace ControleSamsungTV
 
             pages = new StackPanel { VerticalAlignment = VerticalAlignment.Stretch };
             BuildHome(); BuildApps(); BuildRemote(); SelectPage("tv");
-            var scroller = new ScrollViewer { Content = pages, VerticalScrollBarVisibility = ScrollBarVisibility.Auto,
+            var scroller = new ScrollViewer { Content = pages, VerticalScrollBarVisibility = ScrollBarVisibility.Hidden,
                 HorizontalScrollBarVisibility = ScrollBarVisibility.Disabled, Padding = new Thickness(0, 0, 2, 0) };
             Grid.SetRow(scroller, 2); layout.Children.Add(scroller);
 
@@ -169,7 +174,7 @@ namespace ControleSamsungTV
                 if (!allowClose) { e.Cancel = true; HideWindow(); }
                 else tray.Visible = false;
             };
-            pollTimer = new DispatcherTimer { Interval = TimeSpan.FromSeconds(20) };
+            pollTimer = new DispatcherTimer { Interval = TimeSpan.FromSeconds(5) };
             pollTimer.Tick += delegate { RefreshStatus(); };
             volumePollTimer = new DispatcherTimer { Interval = TimeSpan.FromSeconds(2) };
             volumePollTimer.Tick += delegate { RefreshVolume(); };
@@ -246,7 +251,7 @@ namespace ControleSamsungTV
             AddKeyTile(actions, "▣  Fonte", "KEY_SOURCE"); AddKeyTile(actions, "☷  Guia", "KEY_GUIDE");
             body.Children.Add(actions);
             var services = new UniformGrid { Columns = 3, Margin = new Thickness(-2, 0, -2, 0) };
-            AddService(services, "NETFLIX", "#e50914"); AddService(services, "prime video", "#0879d1"); AddService(services, "globoplay", "#ed6a2c");
+            AddService(services, "Netflix", "#e50914"); AddService(services, "Prime Video", "#0879d1"); AddService(services, "Globoplay", "#ed6a2c");
             body.Children.Add(services);
             AddPage(page, card);
         }
@@ -259,6 +264,7 @@ namespace ControleSamsungTV
             var hint = Text("Abrir direto na TV", 9, Muted); hint.Margin = new Thickness(0, 2, 0, 10); card.Children.Add(hint);
             AddAppRow(card, "Netflix", "#e50914"); AddAppRow(card, "Prime Video", "#0879d1");
             AddAppRow(card, "Globoplay", "#ed6a2c"); AddAppRow(card, "YouTube", "#ff2020"); AddAppRow(card, "Disney+", "#173aa8");
+            AddAppRow(card, "Samsung TV Plus", "#142a49"); AddAppRow(card, "Twitch", "#6541c8");
             var note = Text("IDs dos aplicativos variam conforme o modelo e a região da TV.", 9, Muted); note.Margin = new Thickness(0, 10, 0, 0); card.Children.Add(note);
             AddPage(page, card);
         }
@@ -319,17 +325,16 @@ namespace ControleSamsungTV
 
         private void AddService(Panel panel, string label, string color)
         {
-            var b = Button(label, delegate { OpenApp(label == "NETFLIX" ? "Netflix" : label == "prime video" ? "Prime Video" : "Globoplay"); }, color, White, 0, 10);
-            b.Margin = new Thickness(3, 0, 3, 0); b.Height = 34; panel.Children.Add(b);
+            var b = Button(label, delegate { OpenApp(label); }, color, White, 0, 10);
+            b.Margin = new Thickness(3, 2, 3, 2); b.Height = 34; panel.Children.Add(b);
         }
 
         private void AddAppRow(Panel panel, string name, string color)
         {
             var row = new Grid { Background = Brush("#192638"), Margin = new Thickness(0, 3, 0, 3), Height = 47 };
-            row.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(42) }); row.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) }); row.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
-            var badge = new Border { Background = Brush(color), CornerRadius = new CornerRadius(9), Width = 31, Height = 31, Margin = new Thickness(7), Child = Text(name.Substring(0, 1), 14, White, true, HorizontalAlignment.Center) };
-            row.Children.Add(badge); var label = Text(name, 11, White, true); label.VerticalAlignment = VerticalAlignment.Center; Grid.SetColumn(label, 1); row.Children.Add(label);
-            var action = Button("Abrir  ›", delegate { OpenApp(name); }, "#111c2a", Muted, 72, 9); action.Margin = new Thickness(0, 5, 6, 5); Grid.SetColumn(action, 2); row.Children.Add(action);
+            row.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) }); row.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
+            var label = Text(name, 12, White, true); label.Margin = new Thickness(10, 0, 0, 0); label.VerticalAlignment = VerticalAlignment.Center; Grid.SetColumn(label, 0); row.Children.Add(label);
+            var action = Button("Abrir  ›", delegate { OpenApp(name); }, "#111c2a", Muted, 72, 9); action.Margin = new Thickness(0, 5, 6, 5); Grid.SetColumn(action, 1); row.Children.Add(action);
             panel.Children.Add(row);
         }
 
@@ -425,16 +430,106 @@ namespace ControleSamsungTV
 
         private void RefreshStatus()
         {
+            if (statusReadPending) return;
+            statusReadPending = true;
             Task.Run(delegate
             {
                 try
                 {
                     string json = StatusJson();
                     string power = Match(json, "PowerState"); string model = Match(json, "modelName");
-                    Dispatcher.BeginInvoke((Action)delegate { stateLabel.Text = power == "on" ? "TV ligada" : power == "standby" ? "TV em espera" : "TV conectada"; modelLabel.Text = String.IsNullOrEmpty(model) ? "Samsung Smart TV" : model; });
+                    string currentApp = FindRunningApp();
+                    string smartThingsValue = ReadSmartThingsChannel();
+                    bool smartThingsReturnedAppId = LooksLikeAppId(smartThingsValue);
+                    string currentChannel = smartThingsReturnedAppId ? "" : smartThingsValue;
+                    Dispatcher.BeginInvoke((Action)delegate {
+                        stateLabel.Text = power == "on" ? "TV ligada" : power == "standby" ? "TV em espera" : "TV conectada";
+                        modelLabel.Text = String.IsNullOrEmpty(model) ? "Samsung Smart TV" : model;
+                        if (!String.IsNullOrWhiteSpace(currentChannel))
+                            contentLabel.Text = String.IsNullOrWhiteSpace(currentApp) ? "Canal: " + currentChannel : currentApp + " · " + currentChannel;
+                        else
+                            contentLabel.Text = String.IsNullOrEmpty(currentApp) ? "App em execução não identificado" : "Aplicativo aberto: " + currentApp;
+                        contentHint.Text = smartThingsReturnedAppId
+                            ? "SmartThings retornou o ID de um app, não um canal; usando o app visível na TV."
+                            : String.IsNullOrWhiteSpace(smartThingsToken) || String.IsNullOrWhiteSpace(smartThingsDeviceId)
+                                ? "Configure SmartThings no .env para mostrar o canal atual."
+                                : "App e canal atual; o título do programa depende dos dados da TV.";
+                    });
                 }
-                catch { Dispatcher.BeginInvoke((Action)delegate { stateLabel.Text = "TV indisponível"; modelLabel.Text = "Confira a conexão e o IP"; }); }
+                catch { Dispatcher.BeginInvoke((Action)delegate { stateLabel.Text = "TV indisponível"; modelLabel.Text = "Confira a conexão e o IP"; contentLabel.Text = "Conteúdo não identificado"; contentHint.Text = "A conexão local não retornou o app atual."; }); }
+                finally { Dispatcher.BeginInvoke((Action)delegate { statusReadPending = false; }); }
             });
+        }
+
+        private string FindRunningApp()
+        {
+            var apps = new List<KeyValuePair<string, string>> {
+                new KeyValuePair<string, string>("Netflix", "3201907018807"), new KeyValuePair<string, string>("Prime Video", "3201910019365"),
+                new KeyValuePair<string, string>("Globoplay", "3201908019022"), new KeyValuePair<string, string>("YouTube", "111299001912"),
+                new KeyValuePair<string, string>("Disney+", "3201901017640"), new KeyValuePair<string, string>("Twitch", "3202203026841"),
+                new KeyValuePair<string, string>("Samsung TV Plus", "3202405035480"),
+                new KeyValuePair<string, string>("Samsung TV Plus", "com.samsung.tv.tvPlusDeeplinker"),
+                new KeyValuePair<string, string>("Samsung TV Plus", "com.samsung.tv.tvplus")
+            };
+            var requests = new List<Task<KeyValuePair<string, string>>>();
+            foreach (var app in apps)
+            {
+                string name = app.Key, id = app.Value;
+                requests.Add(Task.Factory.StartNew(delegate { return ReadAppStatus(name, id); }));
+            }
+            Task.WaitAll(requests.ToArray());
+            var visibleApps = new List<string>();
+            foreach (var request in requests)
+            {
+                string json = request.Result.Value;
+                if (IsStatusTrue(json, "visible") && !visibleApps.Contains(request.Result.Key)) visibleApps.Add(request.Result.Key);
+            }
+            if (visibleApps.Count == 1) return visibleApps[0];
+            return "";
+        }
+
+        private KeyValuePair<string, string> ReadAppStatus(string name, string id)
+        {
+            try
+            {
+                var request = (HttpWebRequest)WebRequest.Create("https://" + ip + ":8002/api/v2/applications/" + id);
+                request.Timeout = 2500; request.ServerCertificateValidationCallback = delegate { return true; };
+                using (var response = (HttpWebResponse)request.GetResponse())
+                using (var reader = new StreamReader(response.GetResponseStream())) return new KeyValuePair<string, string>(name, reader.ReadToEnd());
+            }
+            catch { return new KeyValuePair<string, string>(name, ""); }
+        }
+
+        private static bool IsStatusTrue(string json, string key)
+        {
+            return Regex.IsMatch(json ?? "", "\\\"" + Regex.Escape(key) + "\\\"\\s*:\\s*(?:true|\\\"true\\\")", RegexOptions.IgnoreCase);
+        }
+
+        private string ReadSmartThingsChannel()
+        {
+            if (String.IsNullOrWhiteSpace(smartThingsToken) || String.IsNullOrWhiteSpace(smartThingsDeviceId)) return "";
+            try
+            {
+                string url = "https://api.smartthings.com/v1/devices/" + Uri.EscapeDataString(smartThingsDeviceId) +
+                    "/components/main/capabilities/tvChannel/status";
+                var request = (HttpWebRequest)WebRequest.Create(url);
+                request.Method = "GET"; request.Timeout = 3500; request.Accept = "application/json";
+                request.Headers[HttpRequestHeader.Authorization] = "Bearer " + smartThingsToken;
+                using (var response = (HttpWebResponse)request.GetResponse())
+                using (var reader = new StreamReader(response.GetResponseStream()))
+                {
+                    string json = reader.ReadToEnd();
+                    var match = Regex.Match(json, "\\\"tvChannelName\\\"\\s*:\\s*\\{\\s*\\\"value\\\"\\s*:\\s*\\\"((?:\\\\.|[^\\\"\\\\])*)\\\"", RegexOptions.IgnoreCase);
+                    return match.Success ? match.Groups[1].Value.Replace("\\\\\"", "\\\"").Replace("\\\\\\\\", "\\\\") : "";
+                }
+            }
+            catch { return ""; }
+        }
+
+        private static bool LooksLikeAppId(string value)
+        {
+            return !String.IsNullOrWhiteSpace(value) && (value.StartsWith("org.tizen.", StringComparison.OrdinalIgnoreCase) ||
+                value.StartsWith("com.samsung.", StringComparison.OrdinalIgnoreCase));
         }
 
         private void UpdateVolumeFromPointer(double x)
@@ -552,8 +647,10 @@ namespace ControleSamsungTV
             {
                 var ids = new Dictionary<string, string[]> {
                     { "Netflix", new[] { "3201907018807", "11101200001" } }, { "Prime Video", new[] { "3201910019365", "3201512006785" } },
-                    { "Globoplay", new[] { "3201908019022" } }, { "YouTube", new[] { "111299001912" } }, { "Disney+", new[] { "3201901017640" } }
+                    { "Globoplay", new[] { "3201908019022" } }, { "YouTube", new[] { "111299001912" } }, { "Disney+", new[] { "3201901017640" } },
+                    { "Twitch", new[] { "3202203026841" } }
                 };
+                if (name == "Samsung TV Plus") { SendKey("KEY_TV"); return; }
                 if (!ids.ContainsKey(name)) throw new InvalidOperationException("Aplicativo desconhecido.");
                 try
                 {
